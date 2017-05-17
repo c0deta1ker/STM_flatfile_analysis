@@ -12,7 +12,7 @@ import flatfile_3 as ff                     # Module that loads in MATRIX flat-f
 
 # Information about the "stm_analysis.py" module
 __version__ = "2.00"
-__date__ = "15th May 2017"
+__date__ = "17th May 2017"
 __status__ = "Pending"
 
 __authors__ = "Procopi Constantinou & Tobias Gill"
@@ -249,6 +249,8 @@ class STT(object):
             line = np.poly1d(np.polyfit(x_range, topo_data[y], 1))(x_range)
             # Appending the line subtracted data to the topo_flat_data array
             topo_flat_data[y] = topo_data[y] - line
+        # Properly zeroing the bottom of the line-wise subtracted scan
+        topo_flat_data = topo_flat_data - np.amin(topo_flat_data)
         # Modify the copy of the flat-file instance so that the data over the scan direction is linewise subtracted
         flat_file_copy[scan_dir].data = topo_flat_data
         # Return the new amended flat file instance.
@@ -598,10 +600,10 @@ class STT(object):
 
         # Plotting the topography image
         if smooth:
-            cax = ax.imshow(figure_data, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax, aspect='equal',
+            cax = ax.imshow(figure_data, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax, aspect='auto',
                             interpolation="gaussian")
         else:
-            cax = ax.imshow(figure_data, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax, aspect='equal')
+            cax = ax.imshow(figure_data, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax, aspect='auto')
         # Defining the x- and y-axes ticks
         # - Extract the x, y units from the flat file
         xy_units = flat_file[scan_dir].info['unitxy']
@@ -742,6 +744,11 @@ class STT(object):
                        fontsize=14)
         plt.gcf().text(0.35, 0.69, '[' + str(np.round(x_max, 1)) + 'x' + str(np.round(y_max, 1)) + '] $' + xy_units
                        + '^2$', fontsize=14)
+        # Extract the x, y incremental real units from the flat file (resolution of the x-y scan directions)
+        x_inc = flat_file[scan_dir].info['xinc']
+        y_inc = flat_file[scan_dir].info['yinc']
+        plt.gcf().text(0.35, 0.67, '$\\Delta x$ = ' + str(np.round(x_inc, 4)) + xy_units, fontsize=14)
+        plt.gcf().text(0.35, 0.65, '$\\Delta y$ = ' + str(np.round(y_inc, 4)) + xy_units, fontsize=14)
 
     def other_topo_plots(self, flat_file, ax, scan_dir=0, cmap=None, vmin=None, vmax=None):
         """
@@ -1133,156 +1140,32 @@ class STT(object):
         display(self.output.children[-1])
 
 
-# 2.1 - Defining the class object that will use the analysed topography scan to look at 1D line profiles
-class STT_lineprof(object):
+# 2.1 - Defining the class object that will use the analysed topography scan to determine its fast-fourier transform
+class STT_fft(object):
     def __init__(self, topo_data):
         """
         Defines the initialisation of the class object.
         topo_data:     The 'STT' class object of the selected, analysed and final topography data.
         """
-        # 2.1.1 -  Extract the final stm topography image from the first stage of the analysis
+        # 2.2.1 - Extract the final stm topography image from the first stage of the analysis
         self.topo_data = topo_data
         self.topo_scan_dir = self.topo_data.scan_dict_inv[self.topo_data.scan_dir]
         self.topo_data = self.topo_data.final_data[self.topo_data.scan_dir]
-        self.topo_xmin = self.topo_data.info['xreal_min']
-        self.topo_xmax = self.topo_data.info['xreal']
-        self.topo_ymin = self.topo_data.info['yreal_min']
-        self.topo_ymax = self.topo_data.info['yreal']
 
-        # 2.1.2 - Line profile information
-        self.line_points = None         # Defining the real points of where the line-profile is taken
-        self.line_pix_points = None     # Defining the pixel points of where the line-profile is taken
-        self.line_prof_len = None       # Defining the real length of the line-profile that is taken
-        self.line_prof_x = None         # Defining the x-domain of the line-profile taken
-        self.line_prof_y = None         # Defining the y-domain of the line-profile taken
+        # 2.2.2 - Determine the FFT and plot it
+        plt.subplots(figsize=(20,10))
 
-        # 2.1.3 - User interaction
-        self.widgets = None         # Widget object to hold all pre-defined widgets
-        self.get_widgets()          # Function to get all of the pre-defined widgets
-        self.output = None          # Output to the user interaction with widgets
-        self.user_interaction()     # Function to allow continuous user interaction
+        ax1 = plt.subplot(1,2,1)
+        self.topo_plot(ax1, self.topo_data)
 
-    def nm2pnt(self, nm, flat_file, axis='x'):
-        """
-        Convert between nanometers and corresponding pixel number for a given Omicron flat file.
+        ax2 = plt.subplot(1,2,2)
+        self.fft_finder()
+        self.fft_plot(ax2, self.fft )
 
-        :param nm: Nanometer value.
-        :param flat_file: Instance of the selected Omicron flat file.
-        :param axis: Plot axis of nm point. Must be either 'x' or 'y'.
-        :return: Pixel number for nanometer value.
-        """
-        if axis == 'x':
-            inc = flat_file.info['xinc']
-        elif axis == 'y':
-            inc = flat_file.info['yinc']
+        plt.show()
 
-        pnt = np.int(np.round(nm / inc))
 
-        if pnt < 0:
-            pnt = 0
-        if axis == 'x':
-            if pnt > flat_file.info['xres']:
-                pnt = flat_file.info['xres']
-        elif axis == 'y':
-            if pnt > flat_file.info['yres']:
-                pnt = flat_file.info['yres']
-
-        return pnt
-
-    def profile(self, points, flat_file, num_points=1000):
-        """
-        Extract a line profile from the given flat file and list of x, y co-ordinates.
-
-        Arguments
-        :param points: List of x, y co-ordinate pairs that define the line profile in real units.
-        :param flat_file: An instance of a Omicron flat file.
-
-        Optional Arguments
-        :param num_points: Number of points in the line profile data.
-        :return: Line profile z-data, Line profile distance-data.
-        """
-        # Finding the total length of the line profile selected by the user
-        length = 0
-        for p in range(len(points) - 1):
-            length += np.sqrt((points[p + 1, 0] - points[p, 0]) ** 2 + (points[p + 1, 1] - points[p, 1]) ** 2)
-        # Finding the total number of pixels in the x- and y-direction
-        x_len = len(flat_file.data[0])
-        y_len = len(flat_file.data)
-        # Finding the points in terms of the x- and y-pixels
-        for point in range(len(points)):
-            points[point][0] = self.nm2pnt(points[point][0] - self.topo_xmin, flat_file, axis='x')
-            points[point][1] = self.nm2pnt(points[point][1] - self.topo_ymin, flat_file, axis='y')
-            if points[point][0] >= x_len:
-                points[point][0] = x_len - 1
-            if points[point][1] >= y_len:
-                points[point][1] = y_len - 1
-        # Defining a function that will determine the value of z for a given co-ordinate (x, y)
-        def line(coords, flat_file):
-
-            x0, y0 = coords[0]
-            x1, y1 = coords[1]
-            num = num_points
-            x, y = np.linspace(x0, x1, num), np.linspace(y0, y1, num)
-
-            zi = flat_file.data[y.astype(np.int), x.astype(np.int)]
-
-            return zi
-        # Determination of the line profile data
-        profile_data = np.array([])
-        for pair in range(len(points) - 1):
-            profile_data = np.append(profile_data, line([points[pair], points[pair + 1]], flat_file))
-        # Return the line profile data and its total length in real units
-        return profile_data, length
-
-    def profile_plot(self, ax, profile_data, length):
-        """
-        Create a plot of the given line profile data.
-
-        Arguments
-        :param ax: The axes upon which to make the topography plot.
-        :param profile_data: List of line profile data.
-        :param length: Nanometer length of line profile.
-        
-
-        Optional Arguments
-        :param xticks: Number of x-axis ticks.
-        :param yticks: Number of y-axis ticks.
-        :return:
-        """
-        # Converting the apparent height in terms of nano-meters
-        profile_data = profile_data / PC['nano']
-        # Plot the line profile data
-        ax.plot(profile_data, 'ko-', markersize=5, linewidth=2)
-
-        # - Only allowing four x and y ticks to appear
-        x_ticks = 5
-        y_ticks = 5
-        # Set the x-axis ticks from the number defined
-        ax.set_xticks([x for x in np.arange(0, len(profile_data) + 10 * 10 ** -10, len(profile_data) / x_ticks)])
-        # Set the x-axis tick labels from the given profile length.
-        ax.set_xticklabels([str(np.round(x, 2)) for x in np.arange(0, length + 1, length / x_ticks)], size=15)
-        # Set the x-axis label.
-        ax.set_xlabel('L / nm', size=18, weight='bold')
-
-        # Set the y-axis ticks from the number defined
-        ax.set_yticks([y for y in np.arange(0, 1.2 * np.max(profile_data), np.max(profile_data) / y_ticks)])
-        # Set the y-axis tick labels from the range of the profile data
-        ax.set_yticklabels(
-            [str(np.round(y, 2)) for y in np.arange(0, 1.2 * np.max(profile_data), np.max(profile_data) / y_ticks)],
-            size=15)
-        # Set the y-axis label
-        ax.set_ylabel('Apparent height / nm', size=18, weight='bold')
-
-        # Add horizontal and vertical axes lines
-        ax.axhline(0, color='black', linewidth=1.5)
-        ax.axvline(0, color='black', linewidth=1.5)
-        # Adding a legend to show the color of the plane and cropped polygons
-        ax.legend(handles=list([patch.Patch(color='black', label='Line-profile')]),
-                  loc='best', prop={'size': 15}, frameon=False)
-        # Adding a grid
-        ax.grid(True, color='gray')
-
-    def topo_profile_plot(self, ax, flat_file, points, cmap=None, vmin=None, vmax=None):
+    def topo_plot(self, ax, flat_file, cmap=None, vmin=None, vmax=None):
         """
         Create a plot of the topography image, with the given line profile locations overlaid.
 
@@ -1319,9 +1202,7 @@ class STT_lineprof(object):
                 vmax = 1
 
         # Plotting the topography image
-        cax = ax.imshow(figure_data, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax, aspect='equal')
-        # Plot the line profile points on the axis.
-        ax.plot(points[:, 0], points[:, 1], 'bo-', markersize=8, linewidth=2.5)
+        cax = ax.imshow(figure_data, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax, aspect='auto')
 
         # Defining the x- and y-axes ticks
         # - Extract the x, y units from the flat file
@@ -1374,8 +1255,332 @@ class STT_lineprof(object):
         ax.set_ylim([0, y_res])
 
         # Adding a legend to show the color of the plane and cropped polygons
-        ax.legend(handles=list([patch.Patch(color='blue', label='Line-profile')]),
+        leg = ax.legend(handles=list([patch.Patch(color='blue', label='Line-profile')]),
+                        loc='best', prop={'size': 15}, frameon=False)
+        for text in leg.get_texts():
+            plt.setp(text, color='w')
+
+        # Adding a grid
+        ax.grid(True, color='gray', alpha=0.6)
+
+    def fft_finder(self):
+        f = np.fft.fft2(self.topo_data.data/PC['nano'])
+        fshift = np.fft.fftshift(f)
+        magnitude_spectrum = (np.abs(fshift))**2
+        self.fft = magnitude_spectrum
+
+    def fft_plot(self, ax, fft, cmap=None, vmin=None, vmax=None):
+        """
+        Create a plot of the topography image, with the given line profile locations overlaid.
+
+        Arguments
+        :param ax: The axes upon which to make the topography plot.
+        :param flat_file: An instance of an Omicron flat file.
+        :param points: List of x, y co-ordinate pairs that construct the line profile, in real units.
+
+        Optional Arguments
+        :param scan_dir: Scan direction of the flat file.
+        :param cmap: Pyplot color scheme to use.
+        :param vmin: Z-axis minimum value.
+        :param vmax: Z-axis maximum value.
+        :param xy_ticks: Number of x-, y-axis ticks.
+        :param z_ticks: Number of z-axis ticks.
+        :return:
+        """
+
+        # Initialising the constants to be used for plotting
+        # - Only allowing four x, y and z ticks to appear
+        xy_ticks = 4
+        z_ticks = 4
+        # - Setting the default parameters for the color-map and color-scale
+        if cmap is None:
+            cmap = 'jet'
+        if vmin is None:
+            vmin = np.amin(fft)
+        if vmax is None:
+            vmax = 1.25 * np.amax(fft)
+            # - If no scan is performed such that vmax is globally zero, then to avoid an error, set it to unity
+            if vmax == 0:
+                vmax = 1
+
+        x = 2 * (1 / np.abs(self.topo_data.info['xreal'] - self.topo_data.info['xreal_min']))
+        y = 2 * (1 / np.abs(self.topo_data.info['yreal'] - self.topo_data.info['yreal_min']))
+
+        cax = ax.imshow(fft, origin='center', cmap=cmap, aspect='auto', norm=LogNorm(vmin=vmin, vmax=vmax),
+                        extent=[-1*x, x, -1*y, y])
+
+        # Setting the colorbar properties
+        # - Create the colorbar next to the primary topography image
+        cbar = plt.colorbar(cax, fraction=0.025, pad=0.01)
+        cbar.set_label('Intensity [arb.]', size=13, weight='bold')  # Set colorbar label
+
+        # Add horizontal and vertical axes lines
+        ax.axhline(0, color='white', linewidth=1.5)
+        ax.axvline(0, color='white', linewidth=1.5)
+
+        # Adding a grid
+        ax.grid(True, color='white', alpha=0.6)
+
+
+# 2.2 - Defining the class object that will use the analysed topography scan to look at 1D line profiles
+class STT_lineprof(object):
+    def __init__(self, topo_data):
+        """
+        Defines the initialisation of the class object.
+        topo_data:     The 'STT' class object of the selected, analysed and final topography data.
+        """
+        # 2.2.1 -  Extract the final stm topography image from the first stage of the analysis
+        self.topo_data = topo_data
+        self.topo_scan_dir = self.topo_data.scan_dict_inv[self.topo_data.scan_dir]
+        self.topo_data = self.topo_data.final_data[self.topo_data.scan_dir]
+        self.topo_xmin = self.topo_data.info['xreal_min']
+        self.topo_xmax = self.topo_data.info['xreal']
+        self.topo_ymin = self.topo_data.info['yreal_min']
+        self.topo_ymax = self.topo_data.info['yreal']
+
+        # 2.2.2 - Line profile information
+        self.line_points = None         # Defining the real points of where the line-profile is taken
+        self.line_pix_points = None     # Defining the pixel points of where the line-profile is taken
+        self.line_prof_len = None       # Defining the real length of the line-profile that is taken
+        self.line_prof_l = None         # Defining the x-domain of the line-profile taken
+        self.line_prof_z = None         # Defining the y-domain of the line-profile taken
+        self.line_prof_dl = None
+        self.line_prof_dz = None
+
+        # 2.2.3 - User interaction
+        self.widgets = None         # Widget object to hold all pre-defined widgets
+        self.get_widgets()          # Function to get all of the pre-defined widgets
+        self.output = None          # Output to the user interaction with widgets
+        self.user_interaction()     # Function to allow continuous user interaction
+
+    def nm2pnt(self, nm, flat_file, axis='x'):
+        """
+        Convert between nanometers and corresponding pixel number for a given Omicron flat file.
+
+        :param nm: Nanometer value.
+        :param flat_file: Instance of the selected Omicron flat file.
+        :param axis: Plot axis of nm point. Must be either 'x' or 'y'.
+        :return: Pixel number for nanometer value.
+        """
+        if axis == 'x':
+            inc = flat_file.info['xinc']
+        elif axis == 'y':
+            inc = flat_file.info['yinc']
+
+        pnt = np.int(np.round(nm / inc))
+
+        if pnt < 0:
+            pnt = 0
+        if axis == 'x':
+            if pnt > flat_file.info['xres']:
+                pnt = flat_file.info['xres']
+        elif axis == 'y':
+            if pnt > flat_file.info['yres']:
+                pnt = flat_file.info['yres']
+
+        return pnt
+
+    def profile(self, points, flat_file, num_points=1000):
+        """
+        Extract a line profile from the given flat file and list of x, y co-ordinates.
+
+        Arguments
+        :param points: List of x, y co-ordinate pairs that define the line profile in real units.
+        :param flat_file: An instance of a Omicron flat file.
+
+        Optional Arguments
+        :param num_points: Number of points in the line profile data.
+        :return: Line profile z-data, Line profile distance-data.
+        """
+
+        # Finding the uncertainty in the line-profile dimensions
+        # - Finding the uncertainty in the distance dimension in nanometers
+        x_inc = flat_file.info['xinc']
+        y_inc = flat_file.info['yinc']
+        dl = np.round(np.sqrt(x_inc ** 2 + y_inc ** 2), 4)
+        # - Finding the uncertainty in the apparent height dimension in nanometers
+        dz = 0.01
+
+        # If the points selected are identical, then return a zero array
+        if points[0][0] == points[1][0] and points[0][1] == points[1][1]:
+            z_data = np.zeros(num_points)
+            l_data = np.zeros(num_points)
+            return l_data, z_data, dl, dz
+
+        # Finding the total length of the line profile selected by the user
+        length = 0
+        for p in range(len(points) - 1):
+            length += np.sqrt((points[p + 1, 0] - points[p, 0]) ** 2 + (points[p + 1, 1] - points[p, 1]) ** 2)
+        # Finding the total number of pixels in the x- and y-direction
+        x_len = len(flat_file.data[0])
+        y_len = len(flat_file.data)
+        # Finding the points in terms of the x- and y-pixels
+        for point in range(len(points)):
+            points[point][0] = self.nm2pnt(points[point][0] - self.topo_xmin, flat_file, axis='x')
+            points[point][1] = self.nm2pnt(points[point][1] - self.topo_ymin, flat_file, axis='y')
+            if points[point][0] >= x_len:
+                points[point][0] = x_len - 1
+            if points[point][1] >= y_len:
+                points[point][1] = y_len - 1
+
+        # Defining a function that will determine the value of z for a given co-ordinate (x, y)
+        def line(coords, flat_file):
+
+            x0, y0 = coords[0]
+            x1, y1 = coords[1]
+            num = num_points
+            x, y = np.linspace(x0, x1, num), np.linspace(y0, y1, num)
+
+            zi = flat_file.data[y.astype(np.int), x.astype(np.int)]
+
+            return zi
+
+        # Determination of the line profile data
+        z_data = np.array([])
+        for pair in range(len(points) - 1):
+            z_data = np.append(z_data, line([points[pair], points[pair + 1]], flat_file))
+
+        # Determination of the domain of the line-profile data
+        l_data = np.linspace(0, length, len(z_data))
+
+        # Return the line profile data and its total length in real units
+        return l_data, z_data, dl, dz, length
+
+    def profile_plot(self, ax, l_data, z_data, dl, dz):
+        """
+        Create a plot of the given line profile data.
+
+        Arguments
+        :param ax: The axes upon which to make the topography plot.
+        :param profile_data: List of line profile data.
+        :param length: Nanometer length of line profile.
+
+
+        Optional Arguments
+        :param xticks: Number of x-axis ticks.
+        :param yticks: Number of y-axis ticks.
+        :return:
+        """
+        # Converting the apparent height in terms of nano-meters
+        profile_data = z_data / PC['nano']
+
+        # Plot the line profile data
+        ax.errorbar(l_data, profile_data, xerr=dl, yerr=dz, fmt='ko-', ecolor='gray', capthick=2, markersize=1.5,
+                    linewidth=0.5)
+
+        # Set the x-axis label
+        ax.set_xlabel('L / nm', size=18, weight='bold')
+        # Set the y-axis label
+        ax.set_ylabel('Apparent height / nm', size=18, weight='bold')
+
+        # Add horizontal and vertical axes lines
+        ax.axhline(0, color='black', linewidth=1.5)
+        ax.axvline(0, color='black', linewidth=1.5)
+        # Adding a legend to show the color of the plane and cropped polygons
+        ax.legend(handles=list([patch.Patch(color='black', label='Line-profile')]),
                   loc='best', prop={'size': 15}, frameon=False)
+        # Adding a grid
+        ax.grid(True, color='gray')
+
+    def topo_profile_plot(self, ax, flat_file, points, cmap=None, vmin=None, vmax=None):
+        """
+        Create a plot of the topography image, with the given line profile locations overlaid.
+
+        Arguments
+        :param ax: The axes upon which to make the topography plot.
+        :param flat_file: An instance of an Omicron flat file.
+        :param points: List of x, y co-ordinate pairs that construct the line profile, in real units.
+
+        Optional Arguments
+        :param scan_dir: Scan direction of the flat file.
+        :param cmap: Pyplot color scheme to use.
+        :param vmin: Z-axis minimum value.
+        :param vmax: Z-axis maximum value.
+        :param xy_ticks: Number of x-, y-axis ticks.
+        :param z_ticks: Number of z-axis ticks.
+        :return:
+        """
+
+        # Initialising the constants to be used for plotting
+        # - Set minimum value of the topography scan to zero and convert to nanometers
+        figure_data = (flat_file.data - np.amin(flat_file.data)) / PC["nano"]
+        # - Only allowing four x, y and z ticks to appear
+        xy_ticks = 4
+        z_ticks = 4
+        # - Setting the default parameters for the color-map and color-scale
+        if cmap is None:
+            cmap = 'hot'
+        if vmin is None:
+            vmin = np.amin(figure_data)
+        if vmax is None:
+            vmax = 1.25 * np.amax(figure_data)
+            # - If no scan is performed such that vmax is globally zero, then to avoid an error, set it to unity
+            if vmax == 0:
+                vmax = 1
+
+        # Plotting the topography image
+        cax = ax.imshow(figure_data, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax, aspect='auto')
+        # Plot the line profile points on the axis
+        ax.plot(points[:, 0], points[:, 1], 'bo-', markersize=8, linewidth=2.5)
+        ax.text(points[0, 0], points[0, 1], 'P0', color='white', weight='bold', fontsize=12)
+        ax.text(points[1, 0], points[1, 1], 'P1', color='white', weight='bold', fontsize=12)
+
+        # Defining the x- and y-axes ticks
+        # - Extract the x, y units from the flat file
+        xy_units = flat_file.info['unitxy']
+        # - Extract the total number of x, y pixels from the flat file (total number of points in the scan)
+        x_res = flat_file.info['xres']
+        y_res = flat_file.info['yres']
+        # - Extract the x, y real units from the flat file (maximum size of the scan in real, integer units)
+        x_max = flat_file.info['xreal']
+        y_max = flat_file.info['yreal']
+        x_min = flat_file.info['xreal_min']
+        y_min = flat_file.info['yreal_min']
+        # - Setting the x-ticks locations by input
+        ax.set_xticks([x for x in np.arange(0, x_res + 1, x_res / xy_ticks)])
+        # - Setting the x-tick labels by rounding the numbers to one decimal place
+        ax.set_xticklabels(
+            [str(np.round(x, 1)) for x in np.arange(x_min, x_max + 1, (x_max - x_min) / xy_ticks)], fontsize=13)
+        # - Setting the y-ticks locations by input
+        ax.set_yticks([y for y in np.arange(0, y_res + 1, y_res / xy_ticks)])
+        # - Setting the y-tick labels by rounding the numbers to one decimal place
+        ax.set_yticklabels(
+            [str(np.round(y, 1)) for y in np.arange(y_min, y_max + 1, (y_max - y_min) / xy_ticks)], fontsize=13)
+        # Labelling the x- and y-axes with the units given from the flat file
+        ax.set_xlabel('x /' + xy_units, size=18, weight='bold')
+        ax.set_ylabel('y /' + xy_units, size=18, weight='bold')
+        # Adding a title to the graph
+        ax.set_title(flat_file.info['runcycle'][:-1] + ' : ' + self.topo_scan_dir,
+                     fontsize=18, weight='bold')
+        # Setting the scale-bar properties
+        # - Defining the size and location of the scale bar
+        sbar_xloc_max = x_res - 0.5 * (x_res / 10)
+        sbar_xloc_min = x_res - 1.5 * (x_res / 10)
+        sbar_loc_text = sbar_xloc_max - 0.5 * (x_res / 10)
+        # - Plotting the scale-bar and its unit text
+        ax.plot([sbar_xloc_min, sbar_xloc_max], [0.02 * y_res, 0.02 * y_res], 'k-', linewidth=5)
+        ax.text(sbar_loc_text, 0.03 * y_res, str(np.round(x_max / 10, 2)) + xy_units, weight='bold', ha='center')
+        # Setting the colorbar properties
+        # - Define the colorbar ticks
+        cbar_ticks = [z for z in np.arange(vmin, vmax * 1.01, vmax / z_ticks)]
+        # - Add labels to the colorbar ticks
+        cbar_ticklabels = [str(np.round(z, 2)) for z in
+                           np.arange(vmin, vmax + 1, vmax / z_ticks)]
+        # - Create the colorbar next to the primary topography image
+        cbar = plt.colorbar(cax, ticks=cbar_ticks, fraction=0.025, pad=0.01)
+        cbar.ax.set_yticklabels(cbar_ticklabels, size=13)  # Set colorbar tick labels
+        cbar.set_label('Height [nm]', size=13, weight='bold')  # Set colorbar label
+
+        # Define the limits of the plot
+        ax.set_xlim([0, x_res])
+        ax.set_ylim([0, y_res])
+
+        # Adding a legend to show the color of the plane and cropped polygons
+        leg = ax.legend(handles=list([patch.Patch(color='blue', label='Line-profile')]),
+                        loc='best', prop={'size': 15}, frameon=False)
+        for text in leg.get_texts():
+            plt.setp(text, color='w')
+
         # Adding a grid
         ax.grid(True, color='gray', alpha=0.6)
 
@@ -1423,9 +1628,8 @@ class STT_lineprof(object):
         self.line_points = points
 
         # Extracting the line profile, line profile domain, length and pixel points over the defined points
-        self.line_prof_y, self.line_prof_len = self.profile(points, self.topo_data)
+        self.line_prof_l, self.line_prof_z, self.line_prof_dl, self.line_prof_dz, self.line_prof_len = self.profile(points, self.topo_data)
         self.line_pix_points = points
-        self.line_prof_x = np.linspace(0, self.line_prof_len, len(self.line_prof_y))
 
         # Defining the figure size
         plt.subplots(figsize=(22, 10))
@@ -1434,17 +1638,29 @@ class STT_lineprof(object):
         ax1 = plt.subplot(1, 2, 1)
         self.topo_profile_plot(ax1, self.topo_data, self.line_pix_points)
 
-        # If the line points are not well defined, ignore the profile plots
-        if l_x0 == l_x1 and l_y0 == l_y1:
-            # Show the figure that has been created
-            plt.show()
-        # If the line points are well defined, plot the line profile
-        else:
-            # Plotting the main topography scan selected
-            ax2 = plt.subplot(2, 2, 4)
-            self.profile_plot(ax2, self.line_prof_y, self.line_prof_len)
-            # Show the figure that has been created
-            plt.show()
+        # Plotting the line profile data
+        ax2 = plt.subplot(2, 2, 4)
+        self.profile_plot(ax2, self.line_prof_l, self.line_prof_z, self.line_prof_dl, self.line_prof_dz)
+
+        # Adding the necessary text information
+        plt.gcf().text(0.55, 0.86, self.topo_data.info['runcycle'][:-1] + ' : ' +
+                       self.topo_data.info['direction'], fontsize=15, weight='bold')
+        plt.gcf().text(0.55, 0.84, self.topo_data.info['date'], fontsize=15, weight='bold')
+
+        plt.gcf().text(0.55, 0.82, 'Comments: ' + self.topo_data.info['comment'], fontsize=15)
+        plt.gcf().text(0.55, 0.75, 'Current set-point: ' + str(self.topo_data.info['current']) + str('A'),
+                       fontsize=15)
+        plt.gcf().text(0.55, 0.73, 'Voltage bias: ' + str(np.round(self.topo_data.info['vgap'], 2)) + str('V'),
+                       fontsize=15)
+        # Extract the x, y incremental real units from the flat file (resolution of the x-y scan directions)
+        plt.gcf().text(0.55, 0.67, '$h_{max}$ = ' + str(np.round(np.max(self.line_prof_z/PC['nano']), 3)) + 'nm',
+                       fontsize=15)
+        plt.gcf().text(0.55, 0.65, '$L_{max}$ = ' + str(np.round(self.line_prof_len, 3)) + 'nm', fontsize=14)
+        plt.gcf().text(0.55, 0.63, '$\\Delta L$ = ' + str(self.line_prof_dl) + 'nm', fontsize=15)
+        plt.gcf().text(0.55, 0.61, '$\\Delta h$ = ' + str(self.line_prof_dz) + 'nm', fontsize=15)
+        # Show the figure that has been created
+        plt.show()
+
         return
 
     def user_interaction(self):
@@ -2436,3 +2652,6 @@ class CITS(object):
 
 
         # 5.2 - Defining all the attributes associated with the CITS file selection
+
+
+
